@@ -1,25 +1,17 @@
+# Enhanced Architecture Design
+
+This system leverages **Zod** at every structural layer to guarantee end-to-end data contract safety across distributed nodes. It isolates write-heavy workloads via a decoupled message broker, offloads high-volume document reads to an object store, and maximizes performance by embedding unstructured JSONB data models directly into highly indexed relational clusters.
+
 ```mermaid
-%%{
-  init: {
-    'theme': 'base',
-    'themeVariables': {
-      'primaryColor': '#f8fafc',
-      'primaryTextColor': '#0a587a',
-      'lineColor': '#036b72',
-      'fontSize': '20px',
-      'fontFamily': 'system-ui, -apple-system, sans-serif'
-    }
-  }
-}%%
 graph TD
-    %% Global Hex-Based Element Styling (High Contrast, Bold Labels)
-    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:3px,font-size:18px,font-weight:bold;
-    classDef bff fill:#f1f5f9,stroke:#0f172a,stroke-width:4px,font-size:19px,font-weight:bold;
-    classDef service fill:#d1fae5,stroke:#059669,stroke-width:3px,font-size:18px,font-weight:bold;
-    classDef cache fill:#ffe4e6,stroke:#e11d48,stroke-width:3px,font-size:18px,font-weight:bold;
-    classDef database fill:#fef3c7,stroke:#d97706,stroke-width:3px,font-size:18px,font-weight:bold;
-    classDef queue fill:#f3e8ff,stroke:#7c3aed,stroke-width:3px,font-size:18px,font-weight:bold;
-    classDef infra fill:#f8fafc,stroke:#64748b,stroke-width:2px,font-size:16px;
+    %% Define Design System and Color Themes
+    classDef client fill:#eff6ff,stroke:#2563eb,stroke-width:2px;
+    classDef bff fill:#f8fafc,stroke:#0f172a,stroke-width:3px;
+    classDef service fill:#ecfdf5,stroke:#059669,stroke-width:2px;
+    classDef cache fill:#fff1f2,stroke:#e11d48,stroke-width:2px;
+    classDef database fill:#fef3c7,stroke:#d97706,stroke-width:2px;
+    classDef queue fill:#faf5ff,stroke:#7c3aed,stroke-width:2px;
+    classDef infra fill:#f1f5f9,stroke:#64748b,stroke-width:1px;
 
     %% DevOps / CI-CD Control plane
     subgraph DevOps_Plane [CI/CD & Control Engine]
@@ -53,10 +45,10 @@ graph TD
     %% Distributed Service Mesh Core
     subgraph Compute_Tier [TS + Node.js Core Services]
         direction LR
-        Ingress[AWS ALB / Ingress Controller]
+        Ingress[AWS ALBi / Ingress Controller]
         
         subgraph UserService [User Management Service]
-            US_App[Node.js Engine]
+            US_App[Node.js / Express or NestJS]
             US_Zod[Zod Input Validator]
             US_Prisma[Prisma / Drizzle ORM]
         end
@@ -73,7 +65,6 @@ graph TD
         end
     end
     class US_App,OS_App,AS_App service;
-    class Ingress infra;
 
     %% Messaging Fabric (Decoupled EDA)
     subgraph Event_Fabric [Event-Driven Mesh Architecture]
@@ -96,7 +87,6 @@ graph TD
     end
     class RedisCluster cache;
     class PG_Primary,PG_Replica,S3 database;
-    class JSONB_Eng infra;
 
     %% Explicit Data Flow Interconnections
     WAF --> Ingress
@@ -129,3 +119,15 @@ graph TD
     OrderService -->|Write Metadata| PG_Primary
     OrderService -->|Stream Heavy Blobs / PDFs / JSON Payload| S3
 ```
+
+## Technical Design Patterns Applied**
+
+*   **Next.js BFF (Backend-For-Frontend)**: Acts as the exclusive orchestration and aggregation gatekeeper. By utilizing Server Actions and API routes running server-side, it handles data transformations, shields back-end APIs, prevents cross-origin resource sharing (CORS) leaks, and limits client bundle size.
+    
+*   **End-to-End Zod Integration**: Zod acts as the structural single source of truth. It validates inbound client parameters inside the BFF, checks execution payloads entering the microservices, and guarantees that any asynchronously structured event payloads conform strictly to schemas before database processing.
+    
+*   **Event-Driven Architecture (EDA)**: Implemented using Kafka/AWS MSK. Microservices do not directly execute remote procedural calls to each other. When an operation occurs (e.g., an order transaction), the Order Service logs state to its local data node and publishes an immutable event message to the broker. Downstream telemetry, notifications, and analytics consume this stream asynchronously, maintaining perfect service isolation.
+    
+*   **PostgreSQL Hybrid Storage & JSONB**: The operational system design leverages standard ACID tables for standard configurations alongside unstructured JSONB blobs for dynamic entities (like audit parameters or custom client attributes). This approach uses **Generalized Inverted Indexing (GIN)** to keep query performance for nested properties sub-millisecond.
+    
+*   **High-Volume Storage Tier**: Employs Redis as an ephemeral state repository to prevent read exhaustion on database replicas. Heavy transaction reports, system archives, and arbitrary data blobs bypass the database entirely and stream directly to **AWS S3** via pre-signed uniform resource locators.

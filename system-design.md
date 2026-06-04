@@ -1,5 +1,4 @@
 # System Architecture Plan
-### TypeScript · Node.js · PostgreSQL · Redis · Next.js · AWS S3
 
 ---
 
@@ -35,41 +34,13 @@ From this anchor, work outward before touching code:
 
 Before architecture is designed, the most important trade-offs must be made explicitly:
 
-|
- Trade-off 
-|
- Question to answer first 
-|
-|
----
-|
----
-|
-|
- Consistency vs. Speed 
-|
- Do all users need to see the exact same data at the exact same moment? Or is slightly stale data acceptable in exchange for faster reads? 
-|
-|
- Relational vs. Document 
-|
- Is the data highly structured with enforced relationships? Or does its shape vary and evolve rapidly? 
-|
-|
- Synchronous vs. Async 
-|
- Does the user need to wait for an operation to complete, or can it happen in the background while they continue? 
-|
-|
- Durable vs. Ephemeral 
-|
- Does this data need to survive a server restart, or is it session-scoped and acceptable to lose? 
-|
-|
- Monolith vs. Services 
-|
- Is the team small enough to benefit from a single deployable unit, or large enough that independent scaling matters? 
-|
+| Trade-off | Question to answer first |
+|---|---|
+| Consistency vs. Speed | Do all users need to see the exact same data at the exact same moment? Or is slightly stale data acceptable in exchange for faster reads? |
+| Relational vs. Document | Is the data highly structured with enforced relationships? Or does its shape vary and evolve rapidly? |
+| Synchronous vs. Async | Does the user need to wait for an operation to complete, or can it happen in the background while they continue? |
+| Durable vs. Ephemeral | Does this data need to survive a server restart, or is it session-scoped and acceptable to lose? |
+| Monolith vs. Services | Is the team small enough to benefit from a single deployable unit, or large enough that independent scaling matters? |
 
 ---
 
@@ -115,7 +86,7 @@ const CreateOrderSchema = z.object({
   }),
 });
 
-type CreateOrderInput = z.infer;
+type CreateOrderInput = z.infer<typeof CreateOrderSchema>;
 ```
 
 > **Why Zod?** Zod schemas serve as the single source of truth for both runtime validation and TypeScript types. When the schema changes, the types change automatically — no drift between validation rules and type definitions.
@@ -197,7 +168,7 @@ Redis sits in front of PostgreSQL for data that is read far more often than it i
 **Cache-aside pattern (the standard approach):**
 
 ```typescript
-async function getProduct(productId: string): Promise {
+async function getProduct(productId: string): Promise<Product> {
   const cacheKey = `product:${productId}`;
 
   // 1. Check Redis first
@@ -229,7 +200,7 @@ Redis is not the source of truth — PostgreSQL is. If Redis becomes unavailable
 ```typescript
 let redisAvailable = true;
 
-async function getWithCache(key: string, fallback: () => Promise) {
+async function getWithCache(key: string, fallback: () => Promise<any>) {
   if (!redisAvailable) return fallback();
   try {
     const cached = await redis.get(key);
@@ -295,40 +266,12 @@ Next.js serves as the **Backend for Frontend (BFF)** — a thin server-side laye
 
 Next.js 13+ introduced a clear separation between rendering contexts:
 
-|
- Server Components 
-|
- Client Components 
-|
-|
----
-|
----
-|
-|
- Run on the server at request time (or build time for static). 
-|
- Run in the browser after hydration. 
-|
-|
- Can access databases, environment variables, secrets directly. 
-|
- Cannot access server-only resources. 
-|
-|
- Cannot use 
-`useState`
-, 
-`useEffect`
-, browser APIs. 
-|
- Can use all React hooks and browser APIs. 
-|
-|
- Best for: data fetching, auth checks, layout. 
-|
- Best for: interactivity, real-time updates, forms. 
-|
+| Server Components | Client Components |
+|---|---|
+| Run on the server at request time (or build time for static). | Run in the browser after hydration. |
+| Can access databases, environment variables, secrets directly. | Cannot access server-only resources. |
+| Cannot use `useState`, `useEffect`, browser APIs. | Can use all React hooks and browser APIs. |
+| Best for: data fetching, auth checks, layout. | Best for: interactivity, real-time updates, forms. |
 
 #### Data Rendering Libraries
 
@@ -418,177 +361,31 @@ Order Service does not know any of these consumers exist. Adding a new consumer 
 
 ### EDA Core Vocabulary
 
-|
- Term 
-|
- Definition 
-|
-|
----
-|
----
-|
-|
-**
-Event
-**
-|
- A record that something happened. Immutable. Past tense. Contains the data describing what occurred. 
-|
-|
-**
-Event Producer
-**
-|
- The service that detects something happened and emits the event. Does not know who will consume it. 
-|
-|
-**
-Event Consumer
-**
-|
- A service that subscribes to a type of event and reacts to it. May do nothing, one thing, or many things. 
-|
-|
-**
-Message Bus / Broker
-**
-|
- The infrastructure that receives events from producers and routes them to consumers. Redis Pub/Sub, BullMQ queues, or dedicated brokers (Kafka, RabbitMQ). Producers and consumers never talk directly. 
-|
-|
-**
-Topic / Channel
-**
-|
- A named stream of events. Producers emit to a topic. Consumers subscribe to a topic. Events of the same logical type live on the same topic. 
-|
-|
-**
-Queue
-**
-|
- A channel where each event is delivered to exactly one consumer. Used for jobs that should be done once by one worker. 
-|
-|
-**
-Pub/Sub
-**
-|
- Publish-Subscribe. One event delivered to multiple consumers simultaneously. Each consumer gets its own copy. 
-|
-|
-**
-Consumer Group
-**
-|
- A set of consumers that share the work of a topic. The bus distributes events across the group — each event goes to one member. Used for horizontal scaling of consumers. 
-|
-|
-**
-Offset / Cursor
-**
-|
- A marker tracking how far a consumer has read through an event stream. Allows consumers to replay events or resume after a restart. 
-|
-|
-**
-Dead Letter Queue (DLQ)
-**
-|
- A separate queue where events go when they cannot be processed after repeated attempts. The main pipeline continues; failures are isolated for investigation. 
-|
-|
-**
-Idempotency
-**
-|
- The property of an operation that produces the same result whether run once or ten times. Critical in EDA because events can be delivered more than once. 
-|
-|
-**
-At-least-once delivery
-**
-|
- The bus guarantees every event reaches every consumer at least once — but may deliver it multiple times. Consumers must be idempotent. 
-|
-|
-**
-Exactly-once delivery
-**
-|
- Every event is processed exactly once. Harder and more expensive than at-least-once. Not always necessary. 
-|
-|
-**
-Backpressure
-**
-|
- A mechanism that slows producers when consumers cannot keep up, preventing the system from being overwhelmed. 
-|
-|
-**
-Event Schema
-**
-|
- The defined structure of an event — its fields, types, and constraints. A shared contract between producers and consumers. Changing a schema without coordination breaks consumers. 
-|
-|
-**
-Event Sourcing
-**
-|
- An architectural pattern where the system's state is derived entirely from its event log rather than storing current state directly. 
-|
-|
-**
-CQRS
-**
-|
- Command Query Responsibility Segregation. Separates write paths (commands) from read paths (queries). Commonly paired with EDA for independent scaling of reads and writes. 
-|
-|
-**
-Saga
-**
-|
- A pattern for managing long-running, multi-step processes across services using events. Each step emits a success or failure event triggering the next step or a compensating action. 
-|
-|
-**
-Compensating Event
-**
-|
- An event emitted to undo a previous step when a saga fails. The distributed equivalent of a rollback. 
-|
-|
-**
-Webhook
-**
-|
- A lightweight event delivery mechanism where the producer sends an HTTP POST to a consumer's registered URL when an event occurs. 
-|
-|
-**
-WebSocket
-**
-|
- A persistent, bidirectional connection between client and server. Allows the server to push events to the browser in real time without the client polling. 
-|
-|
-**
-Server-Sent Events (SSE)
-**
-|
- A one-way persistent HTTP connection from server to client. The server streams events as they occur. Simpler than WebSockets when only the server needs to push. 
-|
-|
-**
-Long Polling
-**
-|
- The client sends a request; the server holds it open until an event occurs (or timeout), then responds. Less efficient than WebSockets but works with standard HTTP. 
-|
+| Term | Definition |
+|---|---|
+| **Event** | A record that something happened. Immutable. Past tense. Contains the data describing what occurred. |
+| **Event Producer** | The service that detects something happened and emits the event. Does not know who will consume it. |
+| **Event Consumer** | A service that subscribes to a type of event and reacts to it. May do nothing, one thing, or many things. |
+| **Message Bus / Broker** | The infrastructure that receives events from producers and routes them to consumers. Redis Pub/Sub, BullMQ queues, or dedicated brokers (Kafka, RabbitMQ). Producers and consumers never talk directly. |
+| **Topic / Channel** | A named stream of events. Producers emit to a topic. Consumers subscribe to a topic. Events of the same logical type live on the same topic. |
+| **Queue** | A channel where each event is delivered to exactly one consumer. Used for jobs that should be done once by one worker. |
+| **Pub/Sub** | Publish-Subscribe. One event delivered to multiple consumers simultaneously. Each consumer gets its own copy. |
+| **Consumer Group** | A set of consumers that share the work of a topic. The bus distributes events across the group — each event goes to one member. Used for horizontal scaling of consumers. |
+| **Offset / Cursor** | A marker tracking how far a consumer has read through an event stream. Allows consumers to replay events or resume after a restart. |
+| **Dead Letter Queue (DLQ)** | A separate queue where events go when they cannot be processed after repeated attempts. The main pipeline continues; failures are isolated for investigation. |
+| **Idempotency** | The property of an operation that produces the same result whether run once or ten times. Critical in EDA because events can be delivered more than once. |
+| **At-least-once delivery** | The bus guarantees every event reaches every consumer at least once — but may deliver it multiple times. Consumers must be idempotent. |
+| **Exactly-once delivery** | Every event is processed exactly once. Harder and more expensive than at-least-once. Not always necessary. |
+| **Backpressure** | A mechanism that slows producers when consumers cannot keep up, preventing the system from being overwhelmed. |
+| **Event Schema** | The defined structure of an event — its fields, types, and constraints. A shared contract between producers and consumers. Changing a schema without coordination breaks consumers. |
+| **Event Sourcing** | An architectural pattern where the system's state is derived entirely from its event log rather than storing current state directly. |
+| **CQRS** | Command Query Responsibility Segregation. Separates write paths (commands) from read paths (queries). Commonly paired with EDA for independent scaling of reads and writes. |
+| **Saga** | A pattern for managing long-running, multi-step processes across services using events. Each step emits a success or failure event triggering the next step or a compensating action. |
+| **Compensating Event** | An event emitted to undo a previous step when a saga fails. The distributed equivalent of a rollback. |
+| **Webhook** | A lightweight event delivery mechanism where the producer sends an HTTP POST to a consumer's registered URL when an event occurs. |
+| **WebSocket** | A persistent, bidirectional connection between client and server. Allows the server to push events to the browser in real time without the client polling. |
+| **Server-Sent Events (SSE)** | A one-way persistent HTTP connection from server to client. The server streams events as they occur. Simpler than WebSockets when only the server needs to push. |
+| **Long Polling** | The client sends a request; the server holds it open until an event occurs (or timeout), then responds. Less efficient than WebSockets but works with standard HTTP. |
 
 ### What is an Asynchronous Call?
 
@@ -838,309 +635,39 @@ The user sees their order status change from "Processing" to "Confirmed" the ins
 
 ---
 
-## System Diagram
-
-[ User Browser / Client ]
-           │  ▲
-           ▼  │  HTTPS / WSS
-┌────────────────────────────────────────────────────────┐
-│ NEXT.JS BFF TIER                                       │
-│ • Next.js App Router (SSR/ISR)  • Route Handlers (BFF) │
-└──────────────────────────┬─────────────────────────────┘
-                           │  ▲
-                           ▼  │  gRPC / Internal REST
-┌────────────────────────────────────────────────────────┐
-│ NODE.JS / TYPESCRIPT CORE BACKEND SERVICES             │
-│ • API Gateway    • Core Services    • Zod Validation   │
-└────────────┬─────────────┬─────────────┬───────────────┘
-             │             │             │
-   Reads/    │             │             │ Publish/
-   Writes    ▼             ▼             ▼ Subscribe
-┌────────────┴────────┐ ┌──┴──────────┐ ┌────────────────┐
-│ HYBRID STORAGE TIER │ │ FILE STORE  │ │ EVENT BROKER   │
-│ • PostgreSQL        │ │ • AWS S3    │ │ • BullMQ       │
-│   (Relational +     │ └─────────────┘ │   (via Redis)  │
-│    JSONB Document)  │                 │ • Apache Kafka │
-│ • Redis Cache       │                 └────────────────┘
-
-
 ## Full Tech Stack Reference
 
-|
- Category 
-|
- Technology 
-|
- Purpose 
-|
-|
----
-|
----
-|
----
-|
-|
-**
-Language
-**
-|
- TypeScript 
-|
- End-to-end type safety across backend and frontend 
-|
-|
-**
-Runtime
-**
-|
- Node.js 
-|
- Server-side JavaScript runtime 
-|
-|
-**
-Framework (BFF)
-**
-|
- Next.js 14+ 
-|
- Server components, API routes, BFF layer 
-|
-|
-**
-Validation
-**
-|
- Zod 
-|
- Runtime schema validation + TypeScript type inference 
-|
-|
-**
-Primary DB
-**
-|
- PostgreSQL 
-|
- Durable, relational, queryable data — source of truth 
-|
-|
-**
-Semi-structured
-**
-|
- PostgreSQL JSONB 
-|
- Flexible schema within relational rows 
-|
-|
-**
-Cache / Queue / Pub-Sub
-**
-|
- Redis 
-|
- Speed layer, session store, rate limiter, message bus 
-|
-|
-**
-Job Queue
-**
-|
- BullMQ 
-|
- Redis-backed job queues with retry, DLQ, scheduling 
-|
-|
-**
-Object Storage
-**
-|
- AWS S3 
-|
- Files, images, exports, backups 
-|
-|
-**
-ORM / Query Builder
-**
-|
- Prisma or Drizzle 
-|
- Type-safe database queries with migration management 
-|
-|
-**
-DB Connection Pool
-**
-|
- pg (node-postgres) 
-|
- Low-level PostgreSQL client with connection pooling 
-|
-|
-**
-Real-Time (server)
-**
-|
- socket.io 
-|
- WebSocket server for bidirectional real-time events 
-|
-|
-**
-Real-Time (client)
-**
-|
- socket.io-client 
-|
- Browser WebSocket client 
-|
-|
-**
-Server Push
-**
-|
- EventSource (native) 
-|
- SSE consumer in the browser 
-|
-|
-**
-Data Fetching
-**
-|
- TanStack Query 
-|
- Client-side server state, caching, background refetch 
-|
-|
-**
-Tables
-**
-|
- TanStack Table 
-|
- Headless table logic — sort, filter, paginate 
-|
-|
-**
-Charts
-**
-|
- Recharts / Tremor 
-|
- Composable data visualization in React 
-|
-|
-**
-Forms
-**
-|
- React Hook Form 
-|
- Performant uncontrolled form management 
-|
-|
-**
-Form Validation
-**
-|
- @hookform/resolvers 
-|
- Zod integration — reuse backend schemas on the frontend 
-|
-|
-**
-UI Primitives
-**
-|
- Radix UI 
-|
- Accessible, unstyled components (dialog, select, tooltip) 
-|
-|
-**
-Styling
-**
-|
- Tailwind CSS 
-|
- Utility-first CSS 
-|
-|
-**
-Auth
-**
-|
- NextAuth.js (Auth.js) 
-|
- Session management, OAuth, JWT, credentials 
-|
-|
-**
-File Uploads
-**
-|
- AWS SDK v3 
-|
- Pre-signed URL generation, multipart upload 
-|
-|
-**
-Environment
-**
-|
- dotenv / t3-env 
-|
- Type-safe environment variable validation at startup 
-|
-|
-**
-API Contracts
-**
-|
- tRPC 
-|
- End-to-end type-safe RPC between Next.js server and client 
-|
-|
-**
-Testing
-**
-|
- Vitest + Supertest 
-|
- Unit and integration tests 
-|
-|
-**
-CI/CD
-**
-|
- GitHub Actions 
-|
- Automated test, lint, build, and deploy pipelines 
-|
-|
-**
-Containerization
-**
-|
- Docker 
-|
- Consistent environments across dev and production 
-|
-|
-**
-Infrastructure
-**
-|
- AWS (ECS / EC2 / RDS) 
-|
- Managed PostgreSQL (RDS), container hosting, S3 
-|
+| Category | Technology | Purpose |
+|---|---|---|
+| **Language** | TypeScript | End-to-end type safety across backend and frontend |
+| **Runtime** | Node.js | Server-side JavaScript runtime |
+| **Framework (BFF)** | Next.js 14+ | Server components, API routes, BFF layer |
+| **Validation** | Zod | Runtime schema validation + TypeScript type inference |
+| **Primary DB** | PostgreSQL | Durable, relational, queryable data — source of truth |
+| **Semi-structured** | PostgreSQL JSONB | Flexible schema within relational rows |
+| **Cache / Queue / Pub-Sub** | Redis | Speed layer, session store, rate limiter, message bus |
+| **Job Queue** | BullMQ | Redis-backed job queues with retry, DLQ, scheduling |
+| **Object Storage** | AWS S3 | Files, images, exports, backups |
+| **ORM / Query Builder** | Prisma or Drizzle | Type-safe database queries with migration management |
+| **DB Connection Pool** | pg (node-postgres) | Low-level PostgreSQL client with connection pooling |
+| **Real-Time (server)** | socket.io | WebSocket server for bidirectional real-time events |
+| **Real-Time (client)** | socket.io-client | Browser WebSocket client |
+| **Server Push** | EventSource (native) | SSE consumer in the browser |
+| **Data Fetching** | TanStack Query | Client-side server state, caching, background refetch |
+| **Tables** | TanStack Table | Headless table logic — sort, filter, paginate |
+| **Charts** | Recharts / Tremor | Composable data visualization in React |
+| **Forms** | React Hook Form | Performant uncontrolled form management |
+| **Form Validation** | @hookform/resolvers | Zod integration — reuse backend schemas on the frontend |
+| **UI Primitives** | Radix UI | Accessible, unstyled components (dialog, select, tooltip) |
+| **Styling** | Tailwind CSS | Utility-first CSS |
+| **Auth** | NextAuth.js (Auth.js) | Session management, OAuth, JWT, credentials |
+| **File Uploads** | AWS SDK v3 | Pre-signed URL generation, multipart upload |
+| **Environment** | dotenv / t3-env | Type-safe environment variable validation at startup |
+| **API Contracts** | tRPC | End-to-end type-safe RPC between Next.js server and client |
+| **Testing** | Vitest + Supertest | Unit and integration tests |
+| **CI/CD** | GitHub Actions | Automated test, lint, build, and deploy pipelines |
+| **Containerization** | Docker | Consistent environments across dev and production |
+| **Infrastructure** | AWS (ECS / EC2 / RDS) | Managed PostgreSQL (RDS), container hosting, S3 |
 
 ---
 

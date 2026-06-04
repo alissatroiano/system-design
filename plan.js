@@ -600,6 +600,6 @@ const doc = new Document({
 });
 
 Packer.toBuffer(doc).then(buffer => {
-  fs.writeFileSync("/mnt/user-data/outputs/System_Architecture_Plan.docx", buffer);
+  fs.writeFileSync("output/System_Architecture_Plan.docx", buffer);
   console.log("Done.");
 });

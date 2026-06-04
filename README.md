@@ -1,317 +1,743 @@
-# System Architecture Plan
+# System Architecture
+
+---
 
 ## Table of Contents
 1. [Planning & Research](#planning--research)
-    - [Planning](#planning)
+    - [Defining the Problem](#defining-the-problem)
+    - [User Research & Trade-Offs](#user-research--trade-offs)
 2. [Architecture Overview](#architecture-overview)
-    - [Backend](#backend)
-    - [Data Handling (read, save, clean, store, render)](#data-handling-read-save-clean-store-render)
-    - [Frontend](#frontend)
-    - [Event-Driven Architecture (EDA) — thorough breakdown](#event-driven-architecture-eda--thorough-breakdown)
-3. [System Design](#system-design)
+   - [Backend](#backend)
+   - [Data Handling — Hybrid Database (PostgreSQL + Redis)](#data-handling--hybrid-database-postgresql--redis)
+   - [Frontend — Next.js BFF](#frontend--nextjs-bff)
+3. [Event-Driven Architecture (EDA)](#event-driven-architecture-eda)
+4. [System Diagram](#system-diagram)
+
+---
 
 ## Planning & Research
 
-### Planning
-- User Research
-- Trade-Offs
+### Defining the Problem
 
-Walkthrough (problem → goals → data lifecycle) — generic guidance for planning a
-data-intensive full-stack system. No languages or frameworks mentioned.
+Every data-intensive system starts with one plain-English sentence:
 
-#### 1) Define the problem and success criteria
-- Who are the users and what are their measurable goals (latency, freshness,
-  throughput, availability, cost)? Define SLOs and SLAs up front.
-- Identify data domains, ownership, and regulatory constraints (PII, retention,
-  residency, access control). Clarify acceptable consistency models.
+> **A specific group of people cannot do a specific thing efficiently because of a specific constraint. This system removes that constraint.**
 
-#### 2) Model the data and the domain
-- Capture authoritative sources and events that change domain state.
-- Draw bounded contexts and ownership for each data type and service.
-- Decide read models (what the UI needs) separate from write models.
+From this anchor, work outward before touching code:
 
-#### 3) Design the data lifecycle (ingest → process → store → serve → observe)
-- Ingest: where data enters (user input, mobile/web clients, sensors, files,
-  external APIs, partner systems). Choose between batch or streaming intake
-  based on timeliness requirements.
-- Validate & Clean: schema validation, typing, canonicalization, dedupe,
-  enrichment, provenance tagging. Fail fast for invalid input; emit
-  telemetry for analysis.
-- Transform & Enrich: normalize formats, join with reference data, compute
-  derived metrics, and create both operational and analytical shapes.
-- Persist: separate operational state (for transactional access) from
-  analytical/archival stores and event logs.
-- Serve & Render: provide tailored read models for frontend needs via APIs,
-  materialized views, caches, or streaming endpoints.
-- Observe: capture metrics, traces, and logs to verify data correctness,
-  latency, throughput, and errors.
+- **Who are the users?** What do they already use? What do they expect in terms of speed and reliability?
+- **What does the data look like?** How does it arrive — form submissions, file uploads, external API webhooks, scheduled jobs? How much of it? How fast?
+- **What are the read patterns?** Is data read frequently by many people, or rarely by a few? Are reads simple lookups or complex aggregations?
+- **What are the write patterns?** Are writes frequent and small (user events) or infrequent and large (batch jobs)?
+- **What fails badly?** If the system is slow, what is the user impact? If it goes down, what breaks?
 
-#### 4) Iterate with small, vertical slices
-- Implement a minimal happy path that proves ingestion → render.
-- Add monitoring, then incrementally add resilience (retries, DLQs,
-  backpressure) and scaling.
+### User Research & Trade-Offs
 
-#### 5) Decouple using asynchronous events (Event-Driven Architecture)
-- Use events to represent state changes and integration points between
-  bounded contexts. Prefer well-defined event schemas and versioning.
-- For cross-system flows that do not need synchronous confirmation,
-  publish events and let interested consumers react at their own pace.
-
-> Example phone-ready summary:
->
-> Start by defining the user-facing goals and required freshness. Model the
-> domain and identify authoritative data sources. Implement a small pipeline
-> that ingests, validates, stores, and serves a minimal dataset. Then switch to
-> an event-driven approach to emit domain events for other services to consume,
-> adding retries, dead-letter handling, and monitoring as you scale.
+Before architecture is designed, the most important trade-offs must be made explicitly:
+```
+|
+ Trade-off 
+|
+ Question to answer first 
+|
+|
+---
+|
+---
+|
+|
+ Consistency vs. Speed 
+|
+ Do all users need to see the exact same data at the exact same moment? Or is slightly stale data acceptable in exchange for faster reads? 
+|
+|
+ Relational vs. Document 
+|
+ Is the data highly structured with enforced relationships? Or does its shape vary and evolve rapidly? 
+|
+|
+ Synchronous vs. Async 
+|
+ Does the user need to wait for an operation to complete, or can it happen in the background while they continue? 
+|
+|
+ Durable vs. Ephemeral 
+|
+ Does this data need to survive a server restart, or is it session-scoped and acceptable to lose? 
+|
+|
+ Monolith vs. Services 
+|
+ Is the team small enough to benefit from a single deployable unit, or large enough that independent scaling matters? 
+|
+```
+---
 
 ## Architecture Overview
 
-This overview is written for the start of a project, before a technical stack
-is chosen. It focuses on architecture decisions, trade-offs, and how to evolve
-the design safely for an enterprise, data-intensive system.
+The system is organized into four layers. Each layer has a single, well-defined responsibility and communicates with adjacent layers through defined contracts.
 
-### Trade-off framing
-- Latency vs Cost: lower latency often means more compute and more complex
-  operational plumbing (streaming, caching). Batch processing reduces cost but
-  increases freshness delay.
-- Strong consistency vs Availability: distributed systems usually choose
-  eventual consistency for availability and scale. Assess where strict
-  transactional guarantees are required and isolate them.
-- Simplicity vs Flexibility: a monolithic data model is simple early on but
-  becomes brittle at scale. Use bounded contexts and clear contracts.
-
-## Backend
-
-The backend is responsible for ingestion, processing, durable storage, and
-serving data to clients or downstream systems.
-
-### Core responsibilities and trade-offs
-- Ingest: choose push (clients send) or pull (polling external sources).
-  - Trade-off: push is timely but requires robust authentication and quota
-    controls; pull centralizes control but may increase latency.
-- Processing: choose between batch windows or continuous streaming.
-  - Trade-off: batch simplifies correctness and testing; streaming improves
-    timeliness and supports fine-grained events.
-- Storage: separate OLTP for transactional access vs OLAP for reporting.
-  - Trade-off: duplicating data increases storage and complexity but improves
-    query performance and isolation.
-
-### Data Handling (read, save, clean, store, render)
-
-- Read (ingest)
-  - Identify all source types: user input, partner APIs, files, logs, streams,
-    or sensors.
-  - Validate incoming data against a schema; reject or quarantine invalid
-    payloads with clear error events.
-  - Accept a mixture of synchronous and asynchronous ingestion depending on
-    client requirements (e.g., immediate acknowledgement vs eventual processing).
-
-- Save (persistence)
-  - Use append-only event logs for capture when auditability and history are
-    important. Store canonical events as the source of truth where feasible.
-  - For operational state, maintain a transactional store with well-defined
-    update semantics. Persist derived data into separate materialized views.
-  - Choose partitions, sharding, and compaction policies based on access
-    patterns and retention needs.
-
-- Clean (validation & transformation)
-  - Apply schema validation, type normalization, and canonical value mapping.
-  - Deduplicate using unique keys or idempotency tokens; mark tombstones for
-    deletes when needed.
-  - Enrich events with provenance metadata (source id, received timestamp,
-    correlation id) for observability and lineage.
-
-- Store (operational vs analytical)
-  - Operational stores provide low-latency reads and transactional updates.
-  - Analytical stores (data warehouse or OLAP structure) are optimized for
-    complex queries and aggregations; populate them via batched or streaming
-    ETL/ELT from event logs or change data capture.
-  - Use cost-effective cold storage for long-term retention and hot stores
-    for recent, frequently accessed data.
-
-- Render (serving to frontend)
-  - Create read models shaped for UI needs (denormalized if necessary).
-  - Serve via APIs, precomputed materialized views, or direct streaming feeds
-    to the frontend. Employ caches and pagination to manage large datasets.
-  - Use optimistic UI updates where UX requires immediate feedback, and
-    reconcile with eventual state when authoritative events arrive.
-
-## Frontend
-
-- The frontend should depend on stable, versioned read models or APIs.
-- Prefer small, idempotent interactions from the UI to backend systems.
-- Use optimistic updates carefully and show reconciliation states (syncing,
-  conflict detected) to users when necessary.
-
-## Event-Driven Architecture (EDA) — thorough breakdown
-
-EDA is an architectural style where services communicate by emitting and
-reacting to events that describe state changes. It decouples producers from
-consumers and enables asynchronous, scalable, and extensible systems.
-
-### Key EDA concepts and components
-- Event: a fact that something happened (immutable, time-stamped, typed).
-- Command: an intent to perform an action; may generate events if successful.
-- Producer/Publisher: creates and emits events or commands.
-- Consumer/Subscriber: listens for events and reacts (update state, call other
-  services, emit new events).
-- Broker/Message Bus: acts as an intermediary that stores, routes, and
-  delivers messages (topics, queues, streams).
-- Topic / Channel: logical stream of events of a particular category.
-- Queue: point-to-point message delivery where one consumer processes a
-  message.
-- Partition: a slice of a topic that allows parallel consumption and ordering
-  guarantees within the partition.
-- Offset / Cursor: position marker for a consumer within a partition or stream.
-- Consumer Group: a set of consumers cooperating to consume a topic in
-  parallel while maintaining per-partition ordering.
-
-### Delivery guarantees and semantics
-- At-most-once: messages may be lost, but will not be duplicated.
-- At-least-once: messages may be delivered multiple times; consumers must be
-  idempotent to handle duplicates.
-- Exactly-once (practical): very hard at scale; often approximated using
-  idempotent operations, transactional writes, or specialized broker support.
-
-### Important patterns and concepts
-- Pub/Sub (publish-subscribe): many consumers can subscribe to a topic and
-  react independently.
-- Request-Reply: an interaction pattern where a caller sends a request and
-  waits for a reply (can be implemented synchronously or via correlated
-  messages).
-- Event Sourcing: store the sequence of domain events as the primary source
-  of truth and build state by replaying events.
-- CQRS (Command Query Responsibility Segregation): separate read and write
-  models; writes emit events that update read models asynchronously.
-- Saga Pattern: coordinate long-running transactions across services using a
-  sequence of local transactions and compensating actions (orchestrated or
-  choreographed).
-- Choreography vs Orchestration: choreography lets services react to events
-  without a central controller; orchestration uses a central coordinator to
-  execute steps.
-
-### Event types and examples (non-exhaustive)
-- Domain Events: UserCreated, OrderPlaced, PaymentCaptured, InventoryReserved
-- CRUD Events: Create, Update, Delete, Upsert, Tombstone
-- Integration Events: PartnerDataReceived, ExternalSyncCompleted
-- Lifecycle Events: Started, Stopped, Paused, Resumed, Retried
-- System / Operational Events: Heartbeat, HealthCheckFailed, ScaleUp,
-  PartitionRebalance
-- Error and Retry Events: ProcessingFailed, RetryScheduled, DeadLettered
-- Compensation Events: OrderCancelledCompensation, RevertInventory
-- Snapshot Events: SnapshotTaken, SnapshotExpired
-- Audit Events: AccessGranted, PolicyChanged, PermissionRevoked
-- Telemetry / Metrics Events: RequestLatencyReported, ThroughputSample
-- Security Events: AuthenticationSucceeded, AuthorizationFailed,
-  KeyRotationCompleted
-- Schema / Evolution Events: SchemaVersionAdded, SchemaMigrationCompleted
-- Data Pipeline Events: FileIngested, BatchProcessed, WindowClosed
-- Time / Schedule Events: TimeoutOccurred, CronTriggered, RetryTimeout
-
-### Event envelope — recommended fields
-- Event ID (unique identifier)
-- Event Type
-- Timestamp
-- Source / Producer ID
-- Correlation ID (ties related events across services)
-- Causation ID (what event caused this event)
-- Schema Version
-- Payload (the event data)
-- Metadata (trace ids, provenance, lineage info)
-
-### Asynchronous calls and how to use them
-- Asynchronous call: an interaction pattern where a caller does not block
-  waiting for a responder; the caller can continue work and handle the
-  response when it arrives.
-- Common async patterns:
-  - Fire-and-forget: emit an event and do not expect an immediate response.
-  - Request-reply (correlated): send a request message and receive a reply
-    on a correlation channel; often includes timeouts and retries.
-  - Streaming: consumers subscribe to a continuous stream of events.
-  - Polling: the consumer periodically checks for new data (simpler but
-    less timely and more load).
-
-### Best practices for async usage
-- Use correlation and causation IDs to trace flows across services.
-- Make consumers idempotent to tolerate at-least-once delivery.
-- Implement exponential backoff and jitter for retries to avoid thundering
-  herds.
-- Emit explicit error and retry events and route problematic messages to a
-  Dead-Letter Queue (DLQ) for manual inspection and reprocessing.
-- Ensure sensitive data is redacted or encrypted in event payloads and logs.
-
-### Resilience and correctness
-- Idempotency: derive unique idempotency keys for operations to avoid
-  duplicate side effects when messages are replayed.
-- Compensating actions: when a multi-step process fails, publish compensation
-  events to undo prior effects.
-- Backpressure: design producers and consumers to respect downstream capacity
-  (rate limiting, batching, windowing).
-- Ordering: document where ordering matters and enforce it by partitioning on
-  a stable key; otherwise design for eventual ordering.
-
-### Observability and testing
-- Tracing: propagate correlation IDs and trace IDs through event metadata and
-  surface end-to-end traces that follow an event across services.
-- Metrics: collect counts, latencies, error rates, consumer lag, and retention
-  metrics.
-- Logging: emit structured logs with event ids and correlation ids.
-- Contract testing: use consumer-driven contracts to ensure evolving event
-  schemas remain compatible.
-
-### Security, compliance, and governance
-- Encrypt event data in transit and at rest; use per-tenant or per-domain
-  encryption keys where required.
-- Apply fine-grained access control to topics and storage.
-- Retention policies: implement automatic expiry, compaction, and archival to
-  meet regulatory requirements.
-- Data minimization: avoid sending PII unless required; prefer pointers to
-  protected storage with access controls.
-
-### When to generate the system diagram
-- Draft early: after domain modeling and before implementation to validate
-  boundaries and data flows with stakeholders.
-- Update iteratively: each major design change, release, or integration
-  should produce a revised diagram.
-- Freeze for delivery: include a final, reviewed diagram in the handoff and
-  runbook.
-
-## System Design 
-
-The diagram below should be generated during the design phase after the
-problem has been defined and the domain boundaries have been mapped. It is
-useful again after major architectural decisions or service boundaries change.
-
-```mermaid
-flowchart LR
-    Client[Client / User Interface]
-    Ingest[Data Ingestion]
-    Validate[Validation & Cleaning]
-    EventBus[Event Bus / Message Broker]
-    ServiceA[Service A
-    (Domain Producer)]
-    ServiceB[Service B
-    (Domain Consumer)]
-    Store[Persistent Stores]
-    ReadModel[Read Model / Cache]
-    Frontend[Frontend Rendering]
-
-    Client -->|Submit data| Ingest
-    Ingest --> Validate
-    Validate -->|Create event| EventBus
-    EventBus --> ServiceA
-    EventBus --> ServiceB
-    ServiceA -->|Update state| Store
-    ServiceA -->|Publish update| EventBus
-    ServiceB -->|Build projection| ReadModel
-    Store --> ReadModel
-    ReadModel --> Frontend
-    Frontend -->|Render view| Client
+```
+[CLIENT]  →  [BFF / API GATEWAY]  →  [SERVICE LAYER]  →  [DATA LAYER]
+                                                               ↓
+                                              [PostgreSQL] [Redis] [S3]
 ```
 
-Notes:
-- Generate the diagram initially during architecture planning, before coding.
-- Update it after domain boundaries and event flows are finalized.
-- Revisit it after major integration or scaling decisions.
+---
+
+### Backend
+
+#### Entry Point & Gateway
+
+All inbound traffic passes through a single entry point before reaching any business logic.
+
+**Responsibilities:**
+- **Authentication** — verify the caller's identity using JWT tokens or session cookies. Reject unauthenticated requests before they go any further.
+- **Authorization** — check that the authenticated caller has permission to perform the requested operation on the requested resource.
+- **Rate limiting** — prevent any single caller from overwhelming the system. Track request counts per user/IP in Redis (fast, ephemeral — ideal for this purpose).
+- **Request parsing and validation** — parse the incoming payload and validate its shape using **Zod** schemas. A request that fails validation is rejected with a clear, structured error response. It never reaches business logic.
+
+**Zod validation example:**
+
+```typescript
+import { z } from 'zod';
+
+const CreateOrderSchema = z.object({
+  userId: z.string().uuid(),
+  items: z.array(z.object({
+    productId: z.string().uuid(),
+    quantity: z.number().int().positive().max(100),
+  })).min(1),
+  shippingAddress: z.object({
+    street: z.string().min(1),
+    city: z.string().min(1),
+    postalCode: z.string().regex(/^\d{5}(-\d{4})?$/),
+  }),
+});
+
+type CreateOrderInput = z.infer;
+```
+
+> **Why Zod?** Zod schemas serve as the single source of truth for both runtime validation and TypeScript types. When the schema changes, the types change automatically — no drift between validation rules and type definitions.
+
+#### Service Layer (Business Logic)
+
+The service layer applies the rules of the domain. It has no knowledge of HTTP, databases, or network protocols. It only understands the language of the business:
+
+- Check if a user is allowed to place an order.
+- Calculate the total cost of a cart including applicable discounts.
+- Determine whether an item is in stock.
+- Decide whether to approve or flag a transaction.
+
+The service layer receives validated, typed inputs from the gateway and returns domain objects. It delegates all I/O to the data access layer.
+
+#### Data Access Layer
+
+The data access layer translates between the service layer's domain language (TypeScript objects, value types) and the storage layer's language (SQL rows, Redis keys, S3 paths). It is the only layer that is allowed to touch the database directly.
+
+**Responsibilities:**
+- Execute reads and writes against PostgreSQL, Redis, and S3.
+- Handle database errors and translate them into domain-level errors the service layer can understand.
+- Manage connection pooling (via **pg** or **Prisma**) to prevent connection exhaustion.
+- Implement the caching strategy — check Redis before hitting PostgreSQL; write to Redis after a successful PostgreSQL read.
+
+---
+
+### Data Handling — Hybrid Database (PostgreSQL + Redis)
+
+This system uses a hybrid storage strategy: **PostgreSQL** for durable, relational, queryable data — and **Redis** for fast, ephemeral, frequently-accessed data. Each serves a fundamentally different purpose. The key discipline is knowing which data belongs where.
+
+#### PostgreSQL — The Source of Truth
+
+PostgreSQL stores all data that must be durable, consistent, and queryable across relationships. It is the system of record — if Redis is lost entirely, nothing permanent is lost, because PostgreSQL holds the ground truth.
+
+**Use PostgreSQL for:**
+- User accounts, roles, and permissions
+- Orders, transactions, invoices
+- Structured records with relationships (user → orders → items → products)
+- Audit logs and history
+- Any data that must survive a server restart
+
+**JSONB for semi-structured data:**
+
+PostgreSQL's `JSONB` column type allows flexible, schema-less sub-documents within an otherwise relational table. This is the right choice when a record's shape varies between rows (e.g., different product types with different attributes, or event payloads with variable fields).
+
+```sql
+CREATE TABLE events (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  type        TEXT NOT NULL,
+  payload     JSONB NOT NULL,
+  user_id     UUID REFERENCES users(id),
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Query inside the JSONB payload
+SELECT * FROM events
+WHERE payload->>'orderId' = '88421'
+AND type = 'ORDER_PLACED';
+
+-- Index a frequently-queried JSONB field
+CREATE INDEX idx_events_order_id ON events ((payload->>'orderId'));
+```
+
+> **When to use JSONB vs. relational columns:** Use relational columns when the field is queried, filtered, joined, or aggregated. Use JSONB when the field is stored and retrieved as a blob, rarely queried, or has a shape that varies between rows.
+
+#### Redis — The Speed Layer
+
+Redis sits in front of PostgreSQL for data that is read far more often than it is written, and where a few seconds of staleness is acceptable. It dramatically reduces database load and response latency.
+
+**Use Redis for:**
+- **Session data** — keep user session state in Redis with a TTL. Fast to read, easy to expire.
+- **API response caching** — cache the result of expensive PostgreSQL queries for a defined TTL.
+- **Rate limiting counters** — increment a counter per user/IP per time window. Redis atomic operations make this race-condition-safe.
+- **Pub/Sub event bus** — publish events between services. Consumers subscribe to channels and react asynchronously.
+- **Leaderboards and real-time rankings** — Redis sorted sets make rank queries O(log N).
+- **Distributed locks** — prevent two workers from processing the same job simultaneously.
+
+**Cache-aside pattern (the standard approach):**
+
+```typescript
+async function getProduct(productId: string): Promise {
+  const cacheKey = `product:${productId}`;
+
+  // 1. Check Redis first
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    return JSON.parse(cached) as Product;
+  }
+
+  // 2. Cache miss — query PostgreSQL
+  const product = await db.query(
+    'SELECT * FROM products WHERE id = $1', [productId]
+  );
+
+  // 3. Write to Redis with a 5-minute TTL
+  await redis.set(cacheKey, JSON.stringify(product), 'EX', 300);
+
+  return product;
+}
+```
+
+#### Hypothetical Failure Scenarios
+
+**Scenario 1: Redis goes down**
+
+Redis is not the source of truth — PostgreSQL is. If Redis becomes unavailable, the cache-aside pattern degrades gracefully: every cache check throws or returns null, and the application falls through to PostgreSQL for every request. This increases database load significantly, but **no data is lost**. When Redis recovers, the cache warms up naturally as requests come in.
+
+*Safeguard:* Implement a circuit breaker around Redis calls. If Redis is consistently unavailable, skip the cache check entirely instead of retrying on every request and adding latency.
+
+```typescript
+let redisAvailable = true;
+
+async function getWithCache(key: string, fallback: () => Promise) {
+  if (!redisAvailable) return fallback();
+  try {
+    const cached = await redis.get(key);
+    if (cached) return JSON.parse(cached);
+    const data = await fallback();
+    await redis.set(key, JSON.stringify(data), 'EX', 300);
+    return data;
+  } catch (err) {
+    redisAvailable = false;
+    setTimeout(() => { redisAvailable = true; }, 30_000); // retry in 30s
+    return fallback();
+  }
+}
+```
+
+**Scenario 2: PostgreSQL primary fails**
+
+PostgreSQL should run in a primary + replica configuration. Replicas receive a continuous stream of write-ahead log (WAL) entries from the primary. If the primary fails:
+
+1. A replica is promoted to primary (automatic with tools like Patroni, or manual with AWS RDS Multi-AZ).
+2. The application's connection pool reconnects to the new primary.
+3. Any writes that were in-flight at the moment of failure and not yet replicated are at risk of being lost — this is the replication lag window.
+
+*Safeguard:* Use synchronous replication for critical write paths (e.g., financial transactions). Accept asynchronous replication for less critical data to preserve write throughput.
+
+**Scenario 3: An S3 upload fails mid-transfer**
+
+File uploads to S3 should use **multipart upload** for large files. If the upload fails partway through, the parts already uploaded are staged in S3 but not assembled. They incur storage costs without being useful.
+
+*Safeguard:* Set a lifecycle policy on the S3 bucket to automatically delete incomplete multipart uploads after 24 hours. On the application side, catch upload errors and either retry the failed parts or delete all staged parts and return an error to the user.
+
+**Scenario 4: A write succeeds in PostgreSQL but the Redis cache is not invalidated**
+
+After a successful write to PostgreSQL, the code that was supposed to delete the stale cache key crashed before it could run. The cache now contains an outdated record.
+
+*Safeguard:* Use TTLs on all cache entries as a safety net — even if invalidation fails, the cache will expire within the TTL window. For critical data, prefer shorter TTLs. For truly critical consistency requirements, skip caching entirely.
+
+#### AWS S3 — Object Storage
+
+S3 stores binary files and large objects that are not suitable for a relational database: user-uploaded files, exported reports, generated documents, images, and backups.
+
+**Upload flow:**
+1. The client requests a **pre-signed upload URL** from the backend.
+2. The backend generates the URL using the AWS SDK and returns it to the client.
+3. The client uploads the file directly to S3 — the file bytes never touch the application server.
+4. S3 notifies the backend via an event (S3 event notification → message queue → consumer service) that the upload is complete.
+5. The consumer service records the S3 object key in PostgreSQL, linking the file to the relevant record.
+
+This pattern keeps large binary transfers out of the application layer and scales naturally with S3's throughput.
+
+---
+
+### Frontend — Next.js BFF
+
+Next.js serves as the **Backend for Frontend (BFF)** — a thin server-side layer that sits between the browser and the backend services. Its purpose is not to contain business logic, but to:
+
+- **Aggregate data** from multiple backend services into a single, page-shaped response.
+- **Transform data** into the exact shape the UI needs — not the shape the backend stores it in.
+- **Enforce access control** at the rendering layer — server components can check session cookies before deciding what to render.
+- **Handle authentication flows** — OAuth callbacks, token refreshes, and session management happen in the BFF, not the browser.
+
+#### Server Components vs. Client Components
+
+Next.js 13+ introduced a clear separation between rendering contexts:
+
+```
+|
+ Server Components 
+|
+ Client Components 
+|
+|
+---
+|
+---
+|
+|
+ Run on the server at request time (or build time for static). 
+|
+ Run in the browser after hydration. 
+|
+|
+ Can access databases, environment variables, secrets directly. 
+|
+ Cannot access server-only resources. 
+|
+|
+ Cannot use 
+`useState`
+, 
+`useEffect`
+, browser APIs. 
+|
+ Can use all React hooks and browser APIs. 
+|
+|
+ Best for: data fetching, auth checks, layout. 
+|
+ Best for: interactivity, real-time updates, forms. 
+|
+
+#### Data Rendering Libraries
+
+For mapping and rendering data-intensive interfaces in a Next.js + TypeScript environment:
+
+**Tabular data:**
+- **TanStack Table (React Table v8)** — headless table logic: sorting, filtering, pagination, grouping. No opinion on markup — you supply the JSX.
+- **AG Grid Community** — full-featured data grid with virtual scrolling for large datasets.
+
+**Charts and visualization:**
+- **Recharts** — composable React chart components built on D3. Best for line, bar, area, and pie charts.
+- **Tremor** — pre-built dashboard components (charts, KPI cards, stat blocks) designed for admin interfaces.
+- **Victory** — React + React Native compatible charting.
+- **Observable Plot** — powerful D3-based library for exploratory data visualization.
+
+**Forms and validation:**
+- **React Hook Form** — performant, uncontrolled form management. Integrates directly with Zod via the `@hookform/resolvers` package — the same Zod schemas used for backend validation can be reused on the frontend.
+- **Radix UI** — unstyled, accessible form primitives (combobox, select, checkbox, dialog).
+
+**Data fetching and synchronization:**
+- **TanStack Query (React Query)** — manages server state: caching, background refetching, loading/error states, optimistic updates, and real-time synchronization via `refetchInterval` or WebSocket integration.
+- **SWR** — lightweight alternative to React Query for simpler caching and revalidation needs.
+
+**Real-time data:**
+- **socket.io-client** — WebSocket client that pairs with socket.io on the Node.js backend.
+- **EventSource (native browser API)** — for consuming Server-Sent Events streams from Next.js API routes.
+
+---
+
+### Data Rendering
+
+**Next.js** can map and render data charts perfectly. Next.js is a full-stack React framework, meaning you can manipulate your data using standard JavaScript functions (like .map(), .filter(), and .reduce()) and feed it directly into powerful React charting libraries.Because Next.js supports both server-side and client-side processing, you can choose exactly where the data is processed and how the charts are rendered.
+
+---
+
+#### Data Mapping
+
+- [Next.js + Zod Server Architecture](DataMapping.md)
+
+## System Design Diagram
+
+> **When to generate this diagram:** Produce it after the Architecture Overview is complete and all major data flows are agreed upon, but before any infrastructure is provisioned. Use it to validate alignment with all stakeholders. Update it whenever a significant architectural decision changes — a stale diagram is actively harmful.
+
+```
+[ User Browser / Client ]
+           │  ▲
+           ▼  │  HTTPS / WSS
+┌────────────────────────────────────────────────────────┐
+│ NEXT.JS BFF TIER                                       │
+│ • Next.js App Router (SSR/ISR)  • Route Handlers (BFF) │
+└──────────────────────────┬─────────────────────────────┘
+                           │  ▲
+                           ▼  │  gRPC / Internal REST
+┌────────────────────────────────────────────────────────┐
+│ NODE.JS / TYPESCRIPT CORE BACKEND SERVICES             │
+│ • API Gateway    • Core Services    • Zod Validation   │
+└────────────┬─────────────┬─────────────┬───────────────┘
+             │             │             │
+   Reads/    │             │             │ Publish/
+   Writes    ▼             ▼             ▼ Subscribe
+┌────────────┴────────┐ ┌──┴──────────┐ ┌────────────────┐
+│ HYBRID STORAGE TIER │ │ FILE STORE  │ │ EVENT BROKER   │
+│ • PostgreSQL        │ │ • AWS S3    │ │ • BullMQ       │
+│   (Relational +     │ └─────────────┘ │   (via Redis)  │
+│    JSONB Document)  │                 │ • Apache Kafka │
+│ • Redis Cache       │                 └────────────────┘
+└─────────────────────┘
+```
+
+```mermaid
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'primaryColor': '#f8fafc',
+      'primaryTextColor': '#0a587a',
+      'lineColor': '#036b72',
+      'fontSize': '20px',
+      'fontFamily': 'system-ui, -apple-system, sans-serif'
+    }
+  }
+}%%
+graph TD
+    %% Global Hex-Based Element Styling (High Contrast, Bold Labels)
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef bff fill:#f1f5f9,stroke:#0f172a,stroke-width:4px,font-size:19px,font-weight:bold;
+    classDef service fill:#d1fae5,stroke:#059669,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef cache fill:#ffe4e6,stroke:#e11d48,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef database fill:#fef3c7,stroke:#d97706,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef queue fill:#f3e8ff,stroke:#7c3aed,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef infra fill:#f8fafc,stroke:#64748b,stroke-width:2px,font-size:16px;
+
+    %% DevOps / CI-CD Control plane
+    subgraph DevOps_Plane [CI/CD & Control Engine]
+        GH[GitHub Repositories] -->|GitHub Actions CI/CD| ECR[AWS Elastic Container Registry]
+    end
+    class GH,ECR infra;
+
+    %% Edge and Routing Layer
+    subgraph Edge_Layer [Global Edge Tier]
+        Route53[AWS Route 53 DNS] --> Cloudfront[AWS CloudFront CDN]
+        Cloudfront --> WAF[AWS WAF Firewall]
+    end
+    class Route53,Cloudfront,WAF infra;
+
+    %% Client and BFF Tier
+    subgraph Client_BFF_Tier [User Experience & BFF Layer]
+        UI[Next.js Client / SPA]
+        
+        subgraph NextJS_BFF [Next.js BFF Node Server]
+            BFF_Route[App Router Server Actions / API Routes]
+            BFF_Zod[Zod Schema Validation]
+            BFF_Cache[Fetch Cache / ISR]
+            
+            BFF_Route --> BFF_Zod
+            BFF_Route --> BFF_Cache
+        end
+    end
+    class UI client;
+    class NextJS_BFF bff;
+
+    %% Distributed Service Mesh Core
+    subgraph Compute_Tier [TS + Node.js Core Services]
+        direction LR
+        Ingress[AWS ALB / Ingress Controller]
+        
+        subgraph UserService [User Management Service]
+            US_App[Node.js Engine]
+            US_Zod[Zod Input Validator]
+            US_Prisma[Prisma / Drizzle ORM]
+        end
+        
+        subgraph OrderService [Transaction Core Service]
+            OS_App[Node.js Core App]
+            OS_Zod[Zod Event Validator]
+            OS_Prisma[Prisma / Drizzle ORM]
+        end
+
+        subgraph AnalyticService [Data Intensive Telemetry Service]
+            AS_App[Node.js Engine]
+            AS_Zod[Zod Stream Validator]
+        end
+    end
+    class US_App,OS_App,AS_App service;
+    class Ingress infra;
+
+    %% Messaging Fabric (Decoupled EDA)
+    subgraph Event_Fabric [Event-Driven Mesh Architecture]
+        KafkaBroker[[Apache Kafka / AWS MSK Cluster]]
+        SchemaRegistry[Confluent Schema Registry]
+    end
+    class KafkaBroker,SchemaRegistry queue;
+
+    %% Persistence and Caching Ecosystem
+    subgraph Storage_Tier [Enterprise Polyglot Data Tier]
+        RedisCluster[(Redis Enterprise Distributed Cache)]
+        
+        subgraph PG_Cluster [PostgreSQL High Availability Cluster]
+            PG_Primary[(Postgres Primary Write Node)]
+            PG_Replica[(Postgres Read Replicas)]
+            JSONB_Eng{{"JSONB Semi-Structured Engine\n(GIN Indexed)"}}
+        end
+        
+        S3[(AWS S3 Standard Object Store)]
+    end
+    class RedisCluster cache;
+    class PG_Primary,PG_Replica,S3 database;
+    class JSONB_Eng infra;
+
+    %% Explicit Data Flow Interconnections
+    WAF --> Ingress
+    Ingress --> NextJS_BFF
+    
+    %% BFF Communication down to Internal API
+    NextJS_BFF -->|gRPC or Private HTTP/2| Ingress
+    Ingress --> UserService
+    Ingress --> OrderService
+
+    %% Inter-service decoupling through Events
+    OrderService -->|Publish Order.Created| KafkaBroker
+    UserService -->|Publish User.Registered| KafkaBroker
+    KafkaBroker -->|Subscribe & Process| AnalyticService
+    
+    %% Zod contract matching against registry
+    OS_Zod <--> SchemaRegistry
+    AS_Zod <--> SchemaRegistry
+
+    %% Database Operations
+    UserService --> RedisCluster
+    RedisCluster -- Cache Miss --> PG_Replica
+    UserService --> PG_Primary
+    
+    OrderService --> PG_Primary
+    PG_Primary --> JSONB_Eng
+    PG_Primary -->|Native Streaming| PG_Replica
+    
+    %% Large file extraction payload handling
+    OrderService -->|Write Metadata| PG_Primary
+    OrderService -->|Stream Heavy Blobs / PDFs / JSON Payload| S3
+```
+
+---
+
+## Event-Driven Architecture (EDA)
+
+### What is an Event?
+
+An event is a record that something happened. It is a fact — immutable, past tense. It does not tell other parts of the system what to do. It simply states: *this thing occurred, at this time, with this data.*
+
+```
+{
+  "eventType": "ORDER_PLACED",
+  "eventId": "evt_7a93bc",
+  "timestamp": "2026-05-28T14:32:00.000Z",
+  "payload": {
+    "orderId": "88421",
+    "userId": "usr_1047",
+    "total": 149.99,
+    "itemCount": 3
+  }
+}
+```
+
+The `ORDER_PLACED` event does not say "send a confirmation email" or "decrement inventory." Those are decisions made by the services that receive the event. The event itself is neutral — it is a fact about what happened.
+
+This is the core discipline of EDA: **services communicate through facts, not instructions.** Instead of Service A directly calling Service B and telling it what to do, A emits a fact and any service that cares about that fact reacts independently.
+
+### Why Event-Driven? The Problem It Solves
+
+In a tightly-coupled system:
+
+```
+Order Service  →  directly calls  →  Email Service
+Order Service  →  directly calls  →  Inventory Service
+Order Service  →  directly calls  →  Analytics Service
+```
+
+If Email Service is slow, Order Service is slow. If Inventory Service is down, Order Service fails. Adding a new Analytics Service requires modifying Order Service's code.
+
+In an event-driven system:
+
+```
+Order Service  →  emits "ORDER_PLACED"  →  Message Bus
+                                              ↓
+                          Email Service  (subscribes, reacts)
+                          Inventory Service (subscribes, reacts)
+                          Analytics Service (subscribes, reacts)
+```
+
+Order Service does not know any of these consumers exist. Adding a new consumer requires no changes to Order Service. A failure in Email Service does not affect order processing.
+
+## System Diagram
+
+```
+[ User Browser / Client ]
+           │  ▲
+           ▼  │  HTTPS / WSS
+┌────────────────────────────────────────────────────────┐
+│ NEXT.JS BFF TIER                                       │
+│ • Next.js App Router (SSR/ISR)  • Route Handlers (BFF) │
+└──────────────────────────┬─────────────────────────────┘
+                           │  ▲
+                           ▼  │  gRPC / Internal REST
+┌────────────────────────────────────────────────────────┐
+│ NODE.JS / TYPESCRIPT CORE BACKEND SERVICES             │
+│ • API Gateway    • Core Services    • Zod Validation   │
+└────────────┬─────────────┬─────────────┬───────────────┘
+             │             │             │
+   Reads/    │             │             │ Publish/
+   Writes    ▼             ▼             ▼ Subscribe
+┌────────────┴────────┐ ┌──┴──────────┐ ┌────────────────┐
+│ HYBRID STORAGE TIER │ │ FILE STORE  │ │ EVENT BROKER   │
+│ • PostgreSQL        │ │ • AWS S3    │ │ • BullMQ       │
+│   (Relational +     │ └─────────────┘ │   (via Redis)  │
+│    JSONB Document)  │                 │ • Apache Kafka │
+│ • Redis Cache       │                 └────────────────┘
+```
+
+```mermaid
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'primaryColor': '#f8fafc',
+      'primaryTextColor': '#0a587a',
+      'lineColor': '#036b72',
+      'fontSize': '20px',
+      'fontFamily': 'system-ui, -apple-system, sans-serif'
+    }
+  }
+}%%
+graph TD
+    %% Global Hex-Based Element Styling (High Contrast, Bold Labels)
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef bff fill:#f1f5f9,stroke:#0f172a,stroke-width:4px,font-size:19px,font-weight:bold;
+    classDef service fill:#d1fae5,stroke:#059669,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef cache fill:#ffe4e6,stroke:#e11d48,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef database fill:#fef3c7,stroke:#d97706,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef queue fill:#f3e8ff,stroke:#7c3aed,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef infra fill:#f8fafc,stroke:#64748b,stroke-width:2px,font-size:16px;
+
+    %% DevOps / CI-CD Control plane
+    subgraph DevOps_Plane [CI/CD & Control Engine]
+        GH[GitHub Repositories] -->|GitHub Actions CI/CD| ECR[AWS Elastic Container Registry]
+    end
+    class GH,ECR infra;
+
+    %% Edge and Routing Layer
+    subgraph Edge_Layer [Global Edge Tier]
+        Route53[AWS Route 53 DNS] --> Cloudfront[AWS CloudFront CDN]
+        Cloudfront --> WAF[AWS WAF Firewall]
+    end
+    class Route53,Cloudfront,WAF infra;
+
+    %% Client and BFF Tier
+    subgraph Client_BFF_Tier [User Experience & BFF Layer]
+        UI[Next.js Client / SPA]
+        
+        subgraph NextJS_BFF [Next.js BFF Node Server]
+            BFF_Route[App Router Server Actions / API Routes]
+            BFF_Zod[Zod Schema Validation]
+            BFF_Cache[Fetch Cache / ISR]
+            
+            BFF_Route --> BFF_Zod
+            BFF_Route --> BFF_Cache
+        end
+    end
+    class UI client;
+    class NextJS_BFF bff;
+
+    %% Distributed Service Mesh Core
+    subgraph Compute_Tier [TS + Node.js Core Services]
+        direction LR
+        Ingress[AWS ALB / Ingress Controller]
+        
+        subgraph UserService [User Management Service]
+            US_App[Node.js Engine]
+            US_Zod[Zod Input Validator]
+            US_Prisma[Prisma / Drizzle ORM]
+        end
+        
+        subgraph OrderService [Transaction Core Service]
+            OS_App[Node.js Core App]
+            OS_Zod[Zod Event Validator]
+            OS_Prisma[Prisma / Drizzle ORM]
+        end
+
+        subgraph AnalyticService [Data Intensive Telemetry Service]
+            AS_App[Node.js Engine]
+            AS_Zod[Zod Stream Validator]
+        end
+    end
+    class US_App,OS_App,AS_App service;
+    class Ingress infra;
+
+    %% Messaging Fabric (Decoupled EDA)
+    subgraph Event_Fabric [Event-Driven Mesh Architecture]
+        KafkaBroker[[Apache Kafka / AWS MSK Cluster]]
+        SchemaRegistry[Confluent Schema Registry]
+    end
+    class KafkaBroker,SchemaRegistry queue;
+
+    %% Persistence and Caching Ecosystem
+    subgraph Storage_Tier [Enterprise Polyglot Data Tier]
+        RedisCluster[(Redis Enterprise Distributed Cache)]
+        
+        subgraph PG_Cluster [PostgreSQL High Availability Cluster]
+            PG_Primary[(Postgres Primary Write Node)]
+            PG_Replica[(Postgres Read Replicas)]
+            JSONB_Eng{{"JSONB Semi-Structured Engine\n(GIN Indexed)"}}
+        end
+        
+        S3[(AWS S3 Standard Object Store)]
+    end
+    class RedisCluster cache;
+    class PG_Primary,PG_Replica,S3 database;
+    class JSONB_Eng infra;
+
+    %% Explicit Data Flow Interconnections
+    WAF --> Ingress
+    Ingress --> NextJS_BFF
+    
+    %% BFF Communication down to Internal API
+    NextJS_BFF -->|gRPC or Private HTTP/2| Ingress
+    Ingress --> UserService
+    Ingress --> OrderService
+
+    %% Inter-service decoupling through Events
+    OrderService -->|Publish Order.Created| KafkaBroker
+    UserService -->|Publish User.Registered| KafkaBroker
+    KafkaBroker -->|Subscribe & Process| AnalyticService
+    
+    %% Zod contract matching against registry
+    OS_Zod <--> SchemaRegistry
+    AS_Zod <--> SchemaRegistry
+
+    %% Database Operations
+    UserService --> RedisCluster
+    RedisCluster -- Cache Miss --> PG_Replica
+    UserService --> PG_Primary
+    
+    OrderService --> PG_Primary
+    PG_Primary --> JSONB_Eng
+    PG_Primary -->|Native Streaming| PG_Replica
+    
+    %% Large file extraction payload handling
+    OrderService -->|Write Metadata| PG_Primary
+    OrderService -->|Stream Heavy Blobs / PDFs / JSON Payload| S3
+```
+
 

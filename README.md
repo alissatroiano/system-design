@@ -1,16 +1,17 @@
-# System Architecture Plan
+# System Architecture
 
 ---
 
 ## Table of Contents
 1. [Planning & Research](#planning--research)
+    - [Defining the Problem](#defining-the-problem)
+    - [User Research & Trade-Offs](#user-research--trade-offs)
 2. [Architecture Overview](#architecture-overview)
    - [Backend](#backend)
    - [Data Handling — Hybrid Database (PostgreSQL + Redis)](#data-handling--hybrid-database-postgresql--redis)
    - [Frontend — Next.js BFF](#frontend--nextjs-bff)
 3. [Event-Driven Architecture (EDA)](#event-driven-architecture-eda)
-4. [Full Tech Stack Reference](#full-tech-stack-reference)
-5. [System Design Diagram](#system-design-diagram)
+4. [System Diagram](#system-diagram)
 
 ---
 
@@ -33,15 +34,43 @@ From this anchor, work outward before touching code:
 ### User Research & Trade-Offs
 
 Before architecture is designed, the most important trade-offs must be made explicitly:
-
-| Trade-off | Question to answer first |
-|---|---|
-| Consistency vs. Speed | Do all users need to see the exact same data at the exact same moment? Or is slightly stale data acceptable in exchange for faster reads? |
-| Relational vs. Document | Is the data highly structured with enforced relationships? Or does its shape vary and evolve rapidly? |
-| Synchronous vs. Async | Does the user need to wait for an operation to complete, or can it happen in the background while they continue? |
-| Durable vs. Ephemeral | Does this data need to survive a server restart, or is it session-scoped and acceptable to lose? |
-| Monolith vs. Services | Is the team small enough to benefit from a single deployable unit, or large enough that independent scaling matters? |
-
+```
+|
+ Trade-off 
+|
+ Question to answer first 
+|
+|
+---
+|
+---
+|
+|
+ Consistency vs. Speed 
+|
+ Do all users need to see the exact same data at the exact same moment? Or is slightly stale data acceptable in exchange for faster reads? 
+|
+|
+ Relational vs. Document 
+|
+ Is the data highly structured with enforced relationships? Or does its shape vary and evolve rapidly? 
+|
+|
+ Synchronous vs. Async 
+|
+ Does the user need to wait for an operation to complete, or can it happen in the background while they continue? 
+|
+|
+ Durable vs. Ephemeral 
+|
+ Does this data need to survive a server restart, or is it session-scoped and acceptable to lose? 
+|
+|
+ Monolith vs. Services 
+|
+ Is the team small enough to benefit from a single deployable unit, or large enough that independent scaling matters? 
+|
+```
 ---
 
 ## Architecture Overview
@@ -86,7 +115,7 @@ const CreateOrderSchema = z.object({
   }),
 });
 
-type CreateOrderInput = z.infer<typeof CreateOrderSchema>;
+type CreateOrderInput = z.infer;
 ```
 
 > **Why Zod?** Zod schemas serve as the single source of truth for both runtime validation and TypeScript types. When the schema changes, the types change automatically — no drift between validation rules and type definitions.
@@ -168,7 +197,7 @@ Redis sits in front of PostgreSQL for data that is read far more often than it i
 **Cache-aside pattern (the standard approach):**
 
 ```typescript
-async function getProduct(productId: string): Promise<Product> {
+async function getProduct(productId: string): Promise {
   const cacheKey = `product:${productId}`;
 
   // 1. Check Redis first
@@ -200,7 +229,7 @@ Redis is not the source of truth — PostgreSQL is. If Redis becomes unavailable
 ```typescript
 let redisAvailable = true;
 
-async function getWithCache(key: string, fallback: () => Promise<any>) {
+async function getWithCache(key: string, fallback: () => Promise) {
   if (!redisAvailable) return fallback();
   try {
     const cached = await redis.get(key);
@@ -266,12 +295,41 @@ Next.js serves as the **Backend for Frontend (BFF)** — a thin server-side laye
 
 Next.js 13+ introduced a clear separation between rendering contexts:
 
-| Server Components | Client Components |
-|---|---|
-| Run on the server at request time (or build time for static). | Run in the browser after hydration. |
-| Can access databases, environment variables, secrets directly. | Cannot access server-only resources. |
-| Cannot use `useState`, `useEffect`, browser APIs. | Can use all React hooks and browser APIs. |
-| Best for: data fetching, auth checks, layout. | Best for: interactivity, real-time updates, forms. |
+```
+|
+ Server Components 
+|
+ Client Components 
+|
+|
+---
+|
+---
+|
+|
+ Run on the server at request time (or build time for static). 
+|
+ Run in the browser after hydration. 
+|
+|
+ Can access databases, environment variables, secrets directly. 
+|
+ Cannot access server-only resources. 
+|
+|
+ Cannot use 
+`useState`
+, 
+`useEffect`
+, browser APIs. 
+|
+ Can use all React hooks and browser APIs. 
+|
+|
+ Best for: data fetching, auth checks, layout. 
+|
+ Best for: interactivity, real-time updates, forms. 
+|
 
 #### Data Rendering Libraries
 
@@ -301,7 +359,229 @@ For mapping and rendering data-intensive interfaces in a Next.js + TypeScript en
 
 ---
 
+### Data Rendering
+
+**Next.js** can map and render data charts perfectly. Next.js is a full-stack React framework, meaning you can manipulate your data using standard JavaScript functions (like .map(), .filter(), and .reduce()) and feed it directly into powerful React charting libraries.Because Next.js supports both server-side and client-side processing, you can choose exactly where the data is processed and how the charts are rendered.
+
+---
+
+#### Data Mapping
+
+- [Next.js + Zod Server Architecture](DataMapping.md)
+
 ## System Design Diagram
+
+> **When to generate this diagram:** Produce it after the Architecture Overview is complete and all major data flows are agreed upon, but before any infrastructure is provisioned. Use it to validate alignment with all stakeholders. Update it whenever a significant architectural decision changes — a stale diagram is actively harmful.
+
+```
+[ User Browser / Client ]
+           │  ▲
+           ▼  │  HTTPS / WSS
+┌────────────────────────────────────────────────────────┐
+│ NEXT.JS BFF TIER                                       │
+│ • Next.js App Router (SSR/ISR)  • Route Handlers (BFF) │
+└──────────────────────────┬─────────────────────────────┘
+                           │  ▲
+                           ▼  │  gRPC / Internal REST
+┌────────────────────────────────────────────────────────┐
+│ NODE.JS / TYPESCRIPT CORE BACKEND SERVICES             │
+│ • API Gateway    • Core Services    • Zod Validation   │
+└────────────┬─────────────┬─────────────┬───────────────┘
+             │             │             │
+   Reads/    │             │             │ Publish/
+   Writes    ▼             ▼             ▼ Subscribe
+┌────────────┴────────┐ ┌──┴──────────┐ ┌────────────────┐
+│ HYBRID STORAGE TIER │ │ FILE STORE  │ │ EVENT BROKER   │
+│ • PostgreSQL        │ │ • AWS S3    │ │ • BullMQ       │
+│   (Relational +     │ └─────────────┘ │   (via Redis)  │
+│    JSONB Document)  │                 │ • Apache Kafka │
+│ • Redis Cache       │                 └────────────────┘
+└─────────────────────┘
+```
+
+```mermaid
+%%{
+  init: {
+    'theme': 'base',
+    'themeVariables': {
+      'primaryColor': '#f8fafc',
+      'primaryTextColor': '#0a587a',
+      'lineColor': '#036b72',
+      'fontSize': '20px',
+      'fontFamily': 'system-ui, -apple-system, sans-serif'
+    }
+  }
+}%%
+graph TD
+    %% Global Hex-Based Element Styling (High Contrast, Bold Labels)
+    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef bff fill:#f1f5f9,stroke:#0f172a,stroke-width:4px,font-size:19px,font-weight:bold;
+    classDef service fill:#d1fae5,stroke:#059669,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef cache fill:#ffe4e6,stroke:#e11d48,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef database fill:#fef3c7,stroke:#d97706,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef queue fill:#f3e8ff,stroke:#7c3aed,stroke-width:3px,font-size:18px,font-weight:bold;
+    classDef infra fill:#f8fafc,stroke:#64748b,stroke-width:2px,font-size:16px;
+
+    %% DevOps / CI-CD Control plane
+    subgraph DevOps_Plane [CI/CD & Control Engine]
+        GH[GitHub Repositories] -->|GitHub Actions CI/CD| ECR[AWS Elastic Container Registry]
+    end
+    class GH,ECR infra;
+
+    %% Edge and Routing Layer
+    subgraph Edge_Layer [Global Edge Tier]
+        Route53[AWS Route 53 DNS] --> Cloudfront[AWS CloudFront CDN]
+        Cloudfront --> WAF[AWS WAF Firewall]
+    end
+    class Route53,Cloudfront,WAF infra;
+
+    %% Client and BFF Tier
+    subgraph Client_BFF_Tier [User Experience & BFF Layer]
+        UI[Next.js Client / SPA]
+        
+        subgraph NextJS_BFF [Next.js BFF Node Server]
+            BFF_Route[App Router Server Actions / API Routes]
+            BFF_Zod[Zod Schema Validation]
+            BFF_Cache[Fetch Cache / ISR]
+            
+            BFF_Route --> BFF_Zod
+            BFF_Route --> BFF_Cache
+        end
+    end
+    class UI client;
+    class NextJS_BFF bff;
+
+    %% Distributed Service Mesh Core
+    subgraph Compute_Tier [TS + Node.js Core Services]
+        direction LR
+        Ingress[AWS ALB / Ingress Controller]
+        
+        subgraph UserService [User Management Service]
+            US_App[Node.js Engine]
+            US_Zod[Zod Input Validator]
+            US_Prisma[Prisma / Drizzle ORM]
+        end
+        
+        subgraph OrderService [Transaction Core Service]
+            OS_App[Node.js Core App]
+            OS_Zod[Zod Event Validator]
+            OS_Prisma[Prisma / Drizzle ORM]
+        end
+
+        subgraph AnalyticService [Data Intensive Telemetry Service]
+            AS_App[Node.js Engine]
+            AS_Zod[Zod Stream Validator]
+        end
+    end
+    class US_App,OS_App,AS_App service;
+    class Ingress infra;
+
+    %% Messaging Fabric (Decoupled EDA)
+    subgraph Event_Fabric [Event-Driven Mesh Architecture]
+        KafkaBroker[[Apache Kafka / AWS MSK Cluster]]
+        SchemaRegistry[Confluent Schema Registry]
+    end
+    class KafkaBroker,SchemaRegistry queue;
+
+    %% Persistence and Caching Ecosystem
+    subgraph Storage_Tier [Enterprise Polyglot Data Tier]
+        RedisCluster[(Redis Enterprise Distributed Cache)]
+        
+        subgraph PG_Cluster [PostgreSQL High Availability Cluster]
+            PG_Primary[(Postgres Primary Write Node)]
+            PG_Replica[(Postgres Read Replicas)]
+            JSONB_Eng{{"JSONB Semi-Structured Engine\n(GIN Indexed)"}}
+        end
+        
+        S3[(AWS S3 Standard Object Store)]
+    end
+    class RedisCluster cache;
+    class PG_Primary,PG_Replica,S3 database;
+    class JSONB_Eng infra;
+
+    %% Explicit Data Flow Interconnections
+    WAF --> Ingress
+    Ingress --> NextJS_BFF
+    
+    %% BFF Communication down to Internal API
+    NextJS_BFF -->|gRPC or Private HTTP/2| Ingress
+    Ingress --> UserService
+    Ingress --> OrderService
+
+    %% Inter-service decoupling through Events
+    OrderService -->|Publish Order.Created| KafkaBroker
+    UserService -->|Publish User.Registered| KafkaBroker
+    KafkaBroker -->|Subscribe & Process| AnalyticService
+    
+    %% Zod contract matching against registry
+    OS_Zod <--> SchemaRegistry
+    AS_Zod <--> SchemaRegistry
+
+    %% Database Operations
+    UserService --> RedisCluster
+    RedisCluster -- Cache Miss --> PG_Replica
+    UserService --> PG_Primary
+    
+    OrderService --> PG_Primary
+    PG_Primary --> JSONB_Eng
+    PG_Primary -->|Native Streaming| PG_Replica
+    
+    %% Large file extraction payload handling
+    OrderService -->|Write Metadata| PG_Primary
+    OrderService -->|Stream Heavy Blobs / PDFs / JSON Payload| S3
+```
+
+---
+
+## Event-Driven Architecture (EDA)
+
+### What is an Event?
+
+An event is a record that something happened. It is a fact — immutable, past tense. It does not tell other parts of the system what to do. It simply states: *this thing occurred, at this time, with this data.*
+
+```
+{
+  "eventType": "ORDER_PLACED",
+  "eventId": "evt_7a93bc",
+  "timestamp": "2026-05-28T14:32:00.000Z",
+  "payload": {
+    "orderId": "88421",
+    "userId": "usr_1047",
+    "total": 149.99,
+    "itemCount": 3
+  }
+}
+```
+
+The `ORDER_PLACED` event does not say "send a confirmation email" or "decrement inventory." Those are decisions made by the services that receive the event. The event itself is neutral — it is a fact about what happened.
+
+This is the core discipline of EDA: **services communicate through facts, not instructions.** Instead of Service A directly calling Service B and telling it what to do, A emits a fact and any service that cares about that fact reacts independently.
+
+### Why Event-Driven? The Problem It Solves
+
+In a tightly-coupled system:
+
+```
+Order Service  →  directly calls  →  Email Service
+Order Service  →  directly calls  →  Inventory Service
+Order Service  →  directly calls  →  Analytics Service
+```
+
+If Email Service is slow, Order Service is slow. If Inventory Service is down, Order Service fails. Adding a new Analytics Service requires modifying Order Service's code.
+
+In an event-driven system:
+
+```
+Order Service  →  emits "ORDER_PLACED"  →  Message Bus
+                                              ↓
+                          Email Service  (subscribes, reacts)
+                          Inventory Service (subscribes, reacts)
+                          Analytics Service (subscribes, reacts)
+```
+
+Order Service does not know any of these consumers exist. Adding a new consumer requires no changes to Order Service. A failure in Email Service does not affect order processing.
+
+## System Diagram
 
 ```
 [ User Browser / Client ]
@@ -459,5 +739,3 @@ graph TD
     OrderService -->|Write Metadata| PG_Primary
     OrderService -->|Stream Heavy Blobs / PDFs / JSON Payload| S3
 ```
-
----

@@ -293,46 +293,16 @@ Next.js serves as the **Backend for Frontend (BFF)** — a thin server-side laye
 
 #### Server Components vs. Client Components
 
-Next.js 13+ introduced a clear separation between rendering contexts:
+Next.js 13+ introduced a clear separation between rendering contexts.
 
-```
-|
- Server Components 
-|
- Client Components 
-|
-|
----
-|
----
-|
-|
- Run on the server at request time (or build time for static). 
-|
- Run in the browser after hydration. 
-|
-|
- Can access databases, environment variables, secrets directly. 
-|
- Cannot access server-only resources. 
-|
-|
- Cannot use 
-`useState`
-, 
-`useEffect`
-, browser APIs. 
-|
- Can use all React hooks and browser APIs. 
-|
-|
- Best for: data fetching, auth checks, layout. 
-|
- Best for: interactivity, real-time updates, forms. 
-|
+| Server Components | Client Components |
+|---|---|
+| Run on the server at request time (or build time for static). | Run in the browser after hydration. |
+| Can access databases, environment variables, secrets directly. | Cannot access server-only resources. |
+| Cannot use `useState`, `useEffect`, browser APIs. | Can use all React hooks and browser APIs. |
+| Best for: data fetching, auth checks, layout. | Best for: interactivity, real-time updates, forms. |
 
-#### Data Rendering Libraries
-
+#### Data Rendering Libraries\n
 For mapping and rendering data-intensive interfaces in a Next.js + TypeScript environment:
 
 **Tabular data:**
@@ -739,5 +709,6 @@ graph TD
     OrderService -->|Write Metadata| PG_Primary
     OrderService -->|Stream Heavy Blobs / PDFs / JSON Payload| S3
 ```
+
 
 

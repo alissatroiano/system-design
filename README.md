@@ -8,9 +8,9 @@
    - [Backend](#backend)
    - [Data Handling — Hybrid Database (PostgreSQL + Redis)](#data-handling--hybrid-database-postgresql--redis)
    - [Frontend — Next.js BFF](#frontend--nextjs-bff)
-3. [System Design Diagram](#system-design-diagram)
-4. [Event-Driven Architecture (EDA)](#event-driven-architecture-eda)
-5. [Full Tech Stack Reference](#full-tech-stack-reference)
+3. [Event-Driven Architecture (EDA)](#event-driven-architecture-eda)
+4. [Full Tech Stack Reference](#full-tech-stack-reference)
+5. [System Design Diagram](#system-design-diagram)
 
 ---
 
@@ -298,14 +298,6 @@ For mapping and rendering data-intensive interfaces in a Next.js + TypeScript en
 **Real-time data:**
 - **socket.io-client** — WebSocket client that pairs with socket.io on the Node.js backend.
 - **EventSource (native browser API)** — for consuming Server-Sent Events streams from Next.js API routes.
-
----
-
-## System Design Diagram
-
-> **When to generate this diagram:** Produce it after the Architecture Overview is complete and all major data flows are agreed upon, but before any infrastructure is provisioned. Use it to validate alignment with all stakeholders. Update it whenever a significant architectural decision changes — a stale diagram is actively harmful.
-
-See the visual diagram accompanying this document.
 
 ---
 
@@ -671,4 +663,69 @@ The user sees their order status change from "Processing" to "Confirmed" the ins
 
 ---
 
-*This document should be treated as a living reference. Update it whenever a significant architectural decision changes. A stale architecture document is worse than no document — it creates false confidence about how the system actually works.*
+## System Design Diagram
+
+```
+[ User Browser / Client ]
+           │  ▲
+           ▼  │  HTTPS / WSS
+┌────────────────────────────────────────────────────────┐
+│ NEXT.JS BFF TIER                                       │
+│ • Next.js App Router (SSR/ISR)  • Route Handlers (BFF) │
+└──────────────────────────┬─────────────────────────────┘
+                           │  ▲
+                           ▼  │  gRPC / Internal REST
+┌────────────────────────────────────────────────────────┐
+│ NODE.JS / TYPESCRIPT CORE BACKEND SERVICES             │
+│ • API Gateway    • Core Services    • Zod Validation   │
+└────────────┬─────────────┬─────────────┬───────────────┘
+             │             │             │
+   Reads/    │             │             │ Publish/
+   Writes    ▼             ▼             ▼ Subscribe
+┌────────────┴────────┐ ┌──┴──────────┐ ┌────────────────┐
+│ HYBRID STORAGE TIER │ │ FILE STORE  │ │ EVENT BROKER   │
+│ • PostgreSQL        │ │ • AWS S3    │ │ • BullMQ       │
+│   (Relational +     │ └─────────────┘ │   (via Redis)  │
+│    JSONB Document)  │                 │ • Apache Kafka │
+│ • Redis Cache       │                 └────────────────┘
+```
+
+
+The diagram below should be generated during the design phase after the
+problem has been defined and the domain boundaries have been mapped. It is
+useful again after major architectural decisions or service boundaries change.
+
+```mermaid
+flowchart LR
+    Client[Client / User Interface]
+    Ingest[Data Ingestion]
+    Validate[Validation & Cleaning]
+    EventBus[Event Bus / Message Broker]
+    ServiceA[Service A
+    (Domain Producer)]
+    ServiceB[Service B
+    (Domain Consumer)]
+    Store[Persistent Stores]
+    ReadModel[Read Model / Cache]
+    Frontend[Frontend Rendering]
+
+    Client -->|Submit data| Ingest
+    Ingest --> Validate
+    Validate -->|Create event| EventBus
+    EventBus --> ServiceA
+    EventBus --> ServiceB
+    ServiceA -->|Update state| Store
+    ServiceA -->|Publish update| EventBus
+    ServiceB -->|Build projection| ReadModel
+    Store --> ReadModel
+    ReadModel --> Frontend
+    Frontend -->|Render view| Client
+```
+
+Notes:
+- Generate the diagram initially during architecture planning, before coding.
+- Update it after domain boundaries and event flows are finalized.
+- Revisit it after major integration or scaling decisions.
+
+
+---
